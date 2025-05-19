@@ -1,0 +1,27 @@
+# Local virtual-environment
+.venv/
+
+# Byte-code & packaging artefacts
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+*.egg-info/
+build/
+dist/
+
+# Jupyter & VS Code artefacts
+.ipynb_checkpoints/
+.vscode/
+
+# Big raw datasets
+data/raw/
+
+# Notebook autosaves
+*.nbconvert.ipynb
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
