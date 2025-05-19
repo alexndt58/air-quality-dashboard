@@ -1,0 +1,3 @@
+﻿# enforce LF for Markdown, treat notebooks as binary so Git skips line-ending checks
+*.md text eol=lf
+*.ipynb binary
