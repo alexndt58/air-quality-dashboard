@@ -12,10 +12,12 @@ def clean(db_path: str = "data/airquality.duckdb", max_gap_hours: int = 2):
 
       1. Builds a consistent datetime column (from Date+time or datetime)
       2. Auto-identifies & renames station & pollutant columns to site_name, no2, pm25
+         - If no station col found, sets all to 'unknown'
       3. Drops negative pollutant readings but preserves NaNs for forward-fill
       4. Forward-fills gaps (per-site for air, globally for weather)
       5. Writes clean_aurn & clean_weather tables
     """
+    # ensure DB folder exists
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect(database=db_path, read_only=False)
 
@@ -38,28 +40,30 @@ def clean(db_path: str = "data/airquality.duckdb", max_gap_hours: int = 2):
     else:
         raise KeyError("raw_aurn missing both Date/time and datetime columns")
 
-    # 2) Identify and rename station/pollutant columns
-    # Station: pick first column containing 'site' or 'code'
-    station_col = next((c for c in df.columns if 'site' in c.lower() or 'code' in c.lower()), None)
-    if station_col and station_col != 'site_name':
-        df.rename(columns={station_col: 'site_name'}, inplace=True)
-    elif not station_col:
-        raise KeyError("Could not find station identifier column in raw_aurn")
+    # 2) Identify and rename station column
+    # Pick column containing 'site' or 'code'
+    candidates = [c for c in df.columns if 'site' in c.lower() or 'code' in c.lower()]
+    if candidates:
+        df.rename(columns={candidates[0]: 'site_name'}, inplace=True)
+    else:
+        # fallback: create a dummy station column
+        df['site_name'] = 'unknown'
 
-    # NO2: pick first column containing 'nitrogen'
-    no2_col = next((c for c in df.columns if 'nitrogen' in c.lower()), None)
-    if no2_col:
-        df.rename(columns={no2_col: 'no2'}, inplace=True)
-    # PM2.5: pick first column containing 'pm' but not 'pm10'
-    pm25_col = next((c for c in df.columns if 'pm' in c.lower() and '10' not in c.lower()), None)
-    if pm25_col:
-        df.rename(columns={pm25_col: 'pm25'}, inplace=True)
+    # Identify and rename NO2
+    no2_candidates = [c for c in df.columns if 'nitrogen' in c.lower() or 'no2' in c.lower()]
+    if no2_candidates:
+        df.rename(columns={no2_candidates[0]: 'no2'}, inplace=True)
+
+    # Identify and rename PM2.5
+    pm25_candidates = [c for c in df.columns if 'pm' in c.lower() and '10' not in c.lower()]
+    if pm25_candidates:
+        df.rename(columns={pm25_candidates[0]: 'pm25'}, inplace=True)
 
     # 3) Drop negative pollutant values (keep NaNs)
     mask = np.ones(len(df), dtype=bool)
-    if 'no2' in df:
+    if 'no2' in df.columns:
         mask &= df['no2'].to_numpy() >= 0
-    if 'pm25' in df:
+    if 'pm25' in df.columns:
         mask &= df['pm25'].to_numpy() >= 0
     df = df.iloc[mask]
 
@@ -73,7 +77,7 @@ def clean(db_path: str = "data/airquality.duckdb", max_gap_hours: int = 2):
         df = df.ffill(limit=max_gap_hours)
     df = df.reset_index()
 
-    # Write clean_aurn
+    # 5) Write clean_aurn
     con.execute("DROP TABLE IF EXISTS clean_aurn")
     con.register("df_aurn", df)
     con.execute("CREATE TABLE clean_aurn AS SELECT * FROM df_aurn")
