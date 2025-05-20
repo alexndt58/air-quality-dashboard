@@ -166,3 +166,34 @@ if not df_meta.empty and "site_name" in df_meta.columns:
         st.info("No joined data to plot on map.")
 else:
     st.info("Metadata table not found; map is disabled.")
+
+st.subheader("Download Data")
+
+# Merge air and weather on datetime for export
+export_df = pd.merge_asof(
+    df_air_f.sort_values("datetime"),
+    df_wx_f.sort_values("datetime"),
+    on="datetime",
+    direction="nearest"
+)
+
+# CSV Download
+csv = export_df.to_csv(index=False).encode('utf-8')
+st.download_button(
+    label="Download as CSV",
+    data=csv,
+    file_name="filtered_air_quality.csv",
+    mime="text/csv"
+)
+
+# Excel Download
+import io
+excel_buffer = io.BytesIO()
+with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
+    export_df.to_excel(writer, index=False, sheet_name="AirQuality")
+st.download_button(
+    label="Download as Excel",
+    data=excel_buffer.getvalue(),
+    file_name="filtered_air_quality.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
