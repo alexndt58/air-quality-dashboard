@@ -44,7 +44,7 @@ def ingest(raw_dir: str = "data/raw", db_path: str = "data/airquality.duckdb"):
         print(f"⚠️  No AURN CSVs found in {raw_dir}")
 
     # --- raw_weather ingestion ---
-    wx_files = sorted(raw_path.glob("*metoffice*.csv*"))
+    wx_files = sorted(raw_path.glob("*met*.csv*"))
     con.execute("DROP TABLE IF EXISTS raw_weather")
     if wx_files:
         con.execute(
