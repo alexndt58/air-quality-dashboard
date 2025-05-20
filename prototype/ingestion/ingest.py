@@ -7,7 +7,7 @@ from pathlib import Path
 def ingest(raw_dir: str = "data/raw", db_path: str = "data/airquality.duckdb"):
     """
     1. Connect to (or create) data/airquality.duckdb
-    2. Read all aurn_hourly*.csv* and metoffice*.csv* from data/raw/
+    2. Read all aurn-related and metoffice-related CSVs from data/raw/
     3. Load them into DuckDB tables raw_aurn and raw_weather
     """
     raw_path = Path(raw_dir)
@@ -18,7 +18,7 @@ def ingest(raw_dir: str = "data/raw", db_path: str = "data/airquality.duckdb"):
     if aurn_files:
         con.execute("DROP TABLE IF EXISTS raw_aurn")
         for idx, f in enumerate(aurn_files):
-            # skip header on files like aurn_hourly_YYYY*.csv*
+            # skip header on official AURN files named aurn_hourly_<year>
             skip = 3 if re.match(r"^aurn_hourly_\d{4}", f.name) else 0
             mode = "CREATE TABLE raw_aurn AS" if idx == 0 else "INSERT INTO raw_aurn"
             sql = f"""
@@ -39,13 +39,26 @@ def ingest(raw_dir: str = "data/raw", db_path: str = "data/airquality.duckdb"):
     wx_files = sorted(raw_path.glob("metoffice*.csv*"))
     con.execute("DROP TABLE IF EXISTS raw_weather")
     if wx_files:
-        con.execute(f"CREATE TABLE raw_weather AS SELECT * FROM read_csv_auto('{wx_files[0]}')")
+        con.execute(
+            f"""
+            CREATE TABLE raw_weather AS
+            SELECT * FROM read_csv_auto(
+              '{wx_files[0]}',
+              delim=',',
+              ignore_errors=true,
+              null_padding=true
+            )
+            """
+        )
         for f in wx_files[1:]:
-            con.execute(f"INSERT INTO raw_weather SELECT * FROM read_csv_auto('{f}')")
+            con.execute(f"INSERT INTO raw_weather SELECT * FROM read_csv_auto('{f}', delim=',', ignore_errors=true, null_padding=true)")
     else:
         print(f"⚠️  No Met Office CSVs found in {raw_dir}")
-        # fallback: empty table matching raw_aurn schema
-        con.execute("CREATE TABLE raw_weather AS SELECT * FROM raw_aurn WHERE FALSE")
+        # fallback: empty table with correct schema
+        con.execute(
+            "CREATE TABLE raw_weather("
+            "datetime TIMESTAMP, temp DOUBLE, wind_speed DOUBLE)"
+        )
 
     con.close()
     print(f"✅ Ingestion complete. Tables raw_aurn and raw_weather are in {db_path}")
