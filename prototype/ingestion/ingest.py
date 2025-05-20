@@ -1,49 +1,78 @@
-# prototype/cleaning/clean.py
+# prototype/ingestion/ingest.py
 
 import duckdb
-import pandas as pd
+import re
+from pathlib import Path
 
-
-def clean(db_path: str = "data/airquality.duckdb", max_gap_hours: int = 2):
+def ingest(raw_dir: str = "data/raw", db_path: str = "data/airquality.duckdb"):
     """
-    Cleans raw_aurn and raw_weather in place:
-    - Drops invalid (negative) values
-    - Forward-fills gaps up to max_gap_hours
-    - Writes clean_aurn and clean_weather tables
+    Ingests CSVs from raw_dir into DuckDB tables:
+    - raw_aurn: AURN data (skips metadata for official files)
+    - raw_weather: Met Office data or empty schema if missing
     """
+    raw_path = Path(raw_dir)
+    # Ensure database directory exists
+    db_file = Path(db_path)
+    db_file.parent.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect(database=db_path, read_only=False)
 
-    # --- Clean AURN ---
-    df_aurn = con.execute("SELECT * FROM raw_aurn").df()
-    df_aurn["datetime"] = pd.to_datetime(df_aurn["datetime"])
-    df_aurn.sort_values(["site_name", "datetime"], inplace=True)
-    # Drop negative values but keep NaNs for forward fill
-    df_aurn = df_aurn[~((df_aurn.no2 < 0) | (df_aurn.pm25 < 0))]
-    # Forward-fill per site without duplicating 'site_name'
-    df_aurn = df_aurn.set_index("datetime")
-    df_aurn = df_aurn.groupby("site_name", group_keys=False).apply(
-        lambda g: g.ffill(limit=max_gap_hours)
-    )
-    df_aurn = df_aurn.reset_index()
-    con.execute("DROP TABLE IF EXISTS clean_aurn")
-    con.register("df_aurn", df_aurn)
-    con.execute("CREATE TABLE clean_aurn AS SELECT * FROM df_aurn")
+    # --- raw_aurn ingestion ---
+    aurn_files = sorted(raw_path.glob("*aurn*.csv*"))
+    con.execute("DROP TABLE IF EXISTS raw_aurn")
+    if aurn_files:
+        for idx, f in enumerate(aurn_files):
+            skip = 3 if re.match(r"^aurn_hourly_\d{4}", f.name) else 0
+            if idx == 0:
+                con.execute(
+                    f"""
+                    CREATE TABLE raw_aurn AS
+                    SELECT * FROM read_csv_auto(
+                        '{f}', skip={skip}, delim=',', ignore_errors=true, null_padding=true
+                    )
+                    """
+                )
+            else:
+                con.execute(
+                    f"""
+                    INSERT INTO raw_aurn
+                    SELECT * FROM read_csv_auto(
+                        '{f}', skip={skip}, delim=',', ignore_errors=true, null_padding=true
+                    )
+                    """
+                )
+    else:
+        print(f"⚠️  No AURN CSVs found in {raw_dir}")
 
-    # --- Clean Weather ---
-    df_wx = con.execute("SELECT * FROM raw_weather").df()
-    df_wx["datetime"] = pd.to_datetime(df_wx["datetime"])
-    df_wx.sort_values("datetime", inplace=True)
-    # Drop rows with missing values (we assume no negative values in weather)
-    df_wx = df_wx.dropna(subset=["temp", "wind_speed"])
-    # Forward-fill globally
-    df_wx = df_wx.set_index("datetime").ffill(limit=max_gap_hours).reset_index()
-    con.execute("DROP TABLE IF EXISTS clean_weather")
-    con.register("df_wx", df_wx)
-    con.execute("CREATE TABLE clean_weather AS SELECT * FROM df_wx")
+    # --- raw_weather ingestion ---
+    wx_files = sorted(raw_path.glob("*metoffice*.csv*"))
+    con.execute("DROP TABLE IF EXISTS raw_weather")
+    if wx_files:
+        con.execute(
+            f"""
+            CREATE TABLE raw_weather AS
+            SELECT * FROM read_csv_auto(
+                '{wx_files[0]}', delim=',', ignore_errors=true, null_padding=true
+            )
+            """
+        )
+        for f in wx_files[1:]:
+            con.execute(
+                f"""
+                INSERT INTO raw_weather
+                SELECT * FROM read_csv_auto(
+                    '{f}', delim=',', ignore_errors=true, null_padding=true
+                )
+                """
+            )
+    else:
+        print(f"⚠️  No Met Office CSVs found in {raw_dir}")
+        # Create empty table with expected schema
+        con.execute(
+            "CREATE TABLE raw_weather(datetime TIMESTAMP, temp DOUBLE, wind_speed DOUBLE)"
+        )
 
     con.close()
 
-
 if __name__ == "__main__":
-    clean()
-    print("✅ Cleaning complete: clean_aurn & clean_weather created")
+    ingest()
+    print("✅ Ingestion complete.")
