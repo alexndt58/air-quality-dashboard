@@ -1,4 +1,5 @@
 import duckdb
+import re
 from pathlib import Path
 
 def ingest(raw_dir: str = "data/raw", db_path: str = "data/airquality.duckdb"):
@@ -6,26 +7,30 @@ def ingest(raw_dir: str = "data/raw", db_path: str = "data/airquality.duckdb"):
     con = duckdb.connect(database=db_path, read_only=False)
 
         # --- raw_aurn ingestion (skip metadata for real AURN files) ---
-    aurn_files = sorted(raw_path.glob("*aurn*.csv*"))
-    if aurn_files:
-        con.execute("DROP TABLE IF EXISTS raw_aurn")
-        for idx, f in enumerate(aurn_files):
-            # skip 3 lines only for official AURN files named aurn_hourly*
-            skip = 3 if f.name.startswith("aurn_hourly") else 0
-            sql = f"""
-                {'CREATE' if idx == 0 else 'INSERT'} TABLE raw_aurn 
-                { 'AS' if idx == 0 else '' }
-                SELECT * FROM read_csv_auto(
-                  '{f}', 
-                  skip={skip}, 
-                  delim=',', 
-                  ignore_errors=true, 
-                  null_padding=true
-                )
-            """
-            con.execute(sql)
-    else:
-        print("⚠️  No AURN CSVs found in", raw_dir)
+    # at the top, add:
+
+# Replace your current AURN ingestion section with:
+aurn_files = sorted(raw_path.glob("*aurn*.csv*"))
+if aurn_files:
+    con.execute("DROP TABLE IF EXISTS raw_aurn")
+    for idx, f in enumerate(aurn_files):
+        # skip 3 lines only for official AURN files named aurn_hourly_<year>
+        skip = 3 if re.match(r"aurn_hourly_\d{4}", f.name) else 0
+        sql = f"""
+            {'CREATE' if idx == 0 else 'INSERT'} TABLE raw_aurn 
+            { 'AS' if idx == 0 else '' }
+            SELECT * FROM read_csv_auto(
+              '{f}', 
+              skip={skip},
+              delim=',',
+              ignore_errors=true,
+              null_padding=true
+            )
+        """
+        con.execute(sql)
+else:
+    print("⚠️  No AURN CSVs found in", raw_dir)
+
 
 
     # --- raw_weather ingestion (empty fallback) ---
