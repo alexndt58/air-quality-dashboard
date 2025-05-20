@@ -8,12 +8,13 @@ from pathlib import Path
 def clean(db_path: str = "data/airquality.duckdb", max_gap_hours: int = 2):
     """
     Cleans raw_aurn and raw_weather tables in the given DuckDB:
+
     - Builds a proper datetime column (from Date+time or datetime)
     - Drops invalid (negative) pollutant rows but preserves NaNs for forward-fill
     - Forward-fills missing values up to max_gap_hours (globally or per-site)
     - Writes out clean_aurn and clean_weather tables
     """
-    # Ensure DB path exists
+    # Ensure DB directory exists
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect(database=db_path, read_only=False)
 
@@ -21,18 +22,16 @@ def clean(db_path: str = "data/airquality.duckdb", max_gap_hours: int = 2):
     df_aurn = con.execute("SELECT * FROM raw_aurn").df()
     cols_lower = {c.lower(): c for c in df_aurn.columns}
 
-    # Construct datetime column
+    # Build datetime
     if 'date' in cols_lower and 'time' in cols_lower:
         date_col = cols_lower['date']
         time_col = cols_lower['time']
-        # drop rows without both date and time
         df_aurn = df_aurn.dropna(subset=[date_col, time_col])
         df_aurn['datetime'] = pd.to_datetime(
             df_aurn[date_col].astype(str) + ' ' + df_aurn[time_col].astype(str),
             dayfirst=True, errors='coerce'
         )
         df_aurn = df_aurn.dropna(subset=['datetime'])
-        # drop original date/time columns
         df_aurn.drop(columns=[date_col, time_col], inplace=True)
     elif 'datetime' in cols_lower:
         df_aurn['datetime'] = pd.to_datetime(df_aurn[cols_lower['datetime']], errors='coerce')
@@ -40,10 +39,15 @@ def clean(db_path: str = "data/airquality.duckdb", max_gap_hours: int = 2):
     else:
         raise KeyError("raw_aurn missing both 'Date'/'time' and 'datetime' columns")
 
-    # Drop negative pollutant rows (keep NaNs)
-    df_aurn = df_aurn[~((df_aurn.get('no2', pd.Series()) < 0) | (df_aurn.get('pm25', pd.Series()) < 0))]
+    # Construct mask for valid pollutant readings
+    mask = pd.Series(True, index=df_aurn.index)
+    if 'no2' in df_aurn.columns:
+        mask &= df_aurn['no2'] >= 0
+    if 'pm25' in df_aurn.columns:
+        mask &= df_aurn['pm25'] >= 0
+    df_aurn = df_aurn[mask]
 
-    # Forward-fill missing values globally or per-site if site identifier exists
+    # Forward-fill missing values
     df_aurn = df_aurn.set_index('datetime')
     if 'site_name' in df_aurn.columns:
         df_aurn = df_aurn.groupby('site_name', group_keys=False).apply(
@@ -61,24 +65,24 @@ def clean(db_path: str = "data/airquality.duckdb", max_gap_hours: int = 2):
     # --- Clean Weather ---
     df_wx = con.execute("SELECT * FROM raw_weather").df()
     if not df_wx.empty:
-        # Ensure datetime exists
+        # Parse datetime
         if 'datetime' in df_wx.columns:
             df_wx['datetime'] = pd.to_datetime(df_wx['datetime'], errors='coerce')
         else:
             raise KeyError("raw_weather missing 'datetime' column")
         df_wx = df_wx.dropna(subset=['datetime', 'temp', 'wind_speed'])
+        df_wx.sort_values('datetime', inplace=True)
         df_wx = df_wx.set_index('datetime').ffill(limit=max_gap_hours).reset_index()
     else:
-        # Create empty with correct columns
         df_wx = pd.DataFrame(columns=['datetime', 'temp', 'wind_speed'])
 
-    # Write cleaned weather
+    # Write cleaned Weather
     con.execute("DROP TABLE IF EXISTS clean_weather")
     con.register('df_wx', df_wx)
     con.execute("CREATE TABLE clean_weather AS SELECT * FROM df_wx")
 
     con.close()
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     clean()
     print("✅ Cleaning complete: clean_aurn & clean_weather created.")
