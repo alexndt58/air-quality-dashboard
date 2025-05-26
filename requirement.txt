@@ -1,0 +1,11 @@
+streamlit
+pandas
+duckdb
+numpy
+plotly
+openpyxl
+xlsxwriter
+kaleido
+python-pptx
+fpdf
+pillow
