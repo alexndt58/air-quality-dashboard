@@ -1,28 +1,27 @@
-# app/app.py
 
+# app/app.py
 import streamlit as st
-import duckdb
 import pandas as pd
 
-st.title("London Air Quality Dashboard")
+st.set_page_config(page_title="Air Quality Dashboard", layout="wide")
+st.title("London Air Quality Dashboard (Hourly Data)")
 
 @st.cache_data
 def load_data():
-    con = duckdb.connect("data/airquality.duckdb", read_only=True)
-    df = con.execute("SELECT * FROM clean_aurn").df()
-    con.close()
+    df = pd.read_csv("data/clean/air_quality_cleaned.csv", parse_dates=["Datetime"])
     return df
 
 df = load_data()
 
-st.write(f"Data shape: {df.shape}")
-st.write(df.head())
+site_options = sorted(df["Site"].unique())
+site = st.sidebar.selectbox("Select Monitoring Site", site_options)
+pollutant = st.sidebar.selectbox("Pollutant", ["NO2", "PM10", "PM2.5"])
 
-# Filter by site (if >1 site present)
-if "site_name" in df.columns:
-    site = st.selectbox("Select site", sorted(df["site_name"].unique()))
-    st.write(df[df["site_name"] == site])
+df_site = df[df["Site"] == site].dropna(subset=[pollutant])
 
-# Plot example: time series of NO2
-if "NO2" in df.columns:
-    st.line_chart(df.set_index("datetime")["NO2"])
+st.subheader(f"{pollutant} - {site}")
+st.line_chart(df_site.set_index("Datetime")[pollutant])
+
+# Show data table
+with st.expander("Show raw data"):
+    st.write(df_site.head(100))
