@@ -9,3 +9,4 @@ kaleido
 python-pptx
 fpdf
 pillow
+pyarrow

@@ -1,52 +1,38 @@
 # prototype/cleaning/clean.py
 
 import pandas as pd
-from pathlib import Path
+import os
 
-def clean(input_path="data/raw/AirQualityDataHourly.csv", output_path="data/clean/clean_air_quality.csv"):
-    """
-    Cleans the AirQualityDataHourly.csv:
-    - Skips metadata/header rows
-    - Combines 'Date' and 'Time' to a single 'datetime'
-    - Keeps and renames NO2, PM10, PM2.5 columns
-    - Saves cleaned file as output_path (CSV)
-    """
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+def clean():
+    infile = "data/raw/AirQualityDataHourly.csv"
+    outfile = "data/clean/clean_air_quality.csv"
+    os.makedirs(os.path.dirname(outfile), exist_ok=True)
+    df = pd.read_csv(infile, skiprows=10)
+    # Clean up whitespace in col names
+    df.columns = [c.strip() for c in df.columns]
+    # Combine date/time to datetime
+    df["datetime"] = pd.to_datetime(df["Date"] + " " + df["Time"], errors="coerce", dayfirst=True)
 
-    # 1. Read skipping metadata (usually first 10 lines in UK-AIR CSVs)
-    df = pd.read_csv(input_path, skiprows=11)
-    
-    # 2. Standardize columns (strip whitespace, fix names)
-    df.columns = [col.strip() for col in df.columns]
-    # Rename columns for consistency
-    rename_dict = {
-        "Date": "date",
-        "Time": "time",
+    # Keep only relevant columns
+    keep_cols = [
+        "datetime", 
+        "Nitrogen dioxide", 
+        "PM10 particulate matter (Hourly measured)", 
+        "PM2.5 particulate matter (Hourly measured)"
+    ]
+    df = df[keep_cols].copy()
+    df = df.rename(columns={
         "Nitrogen dioxide": "no2",
         "PM10 particulate matter (Hourly measured)": "pm10",
-        "PM2.5 particulate matter (Hourly measured)": "pm25",
-        # Status columns are not needed for main time series analysis
-    }
-    df = df.rename(columns=rename_dict)
+        "PM2.5 particulate matter (Hourly measured)": "pm25"
+    })
 
-    # 3. Drop 'Status' columns if present
-    df = df[[c for c in df.columns if "Status" not in c]]
+    # Drop rows without datetime or all pollutants missing
+    df = df.dropna(subset=["datetime"], how="any")
+    df = df.dropna(subset=["no2", "pm10", "pm25"], how="all")
 
-    # 4. Combine date & time into a single datetime column
-    df["datetime"] = pd.to_datetime(df["date"] + " " + df["time"], errors="coerce", dayfirst=True)
-
-    # 5. Keep relevant columns only (adjust as needed)
-    keep_cols = ["datetime", "no2", "pm10", "pm25"]
-    df_clean = df[keep_cols].copy()
-
-    # 6. Drop rows with missing datetime or pollutant data (optional)
-    df_clean = df_clean.dropna(subset=["datetime"])  # Drop rows without valid datetime
-
-    # 7. Save cleaned data to CSV
-    df_clean.to_csv(output_path, index=False)
-    print(f"✅ Cleaned data saved to {output_path}")
+    df.to_csv(outfile, index=False)
+    print(f"✅ Cleaned data written to {outfile}")
 
 if __name__ == "__main__":
     clean()
-
-
