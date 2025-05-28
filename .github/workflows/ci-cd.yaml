@@ -20,7 +20,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install flake8 pytest streamlit
+          pip install duckdb flake8 pytest streamlit
 
       - name: Lint with flake8
         run: |
