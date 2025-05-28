@@ -14,78 +14,73 @@ NUM_RE      = re.compile(r"[-+]?\d+(?:[.,]\d+)?")
 
 @st.cache_data(show_spinner="📊 Loading data…")
 def load_and_clean(path):
-    # Detect delimiter from first line
+    # Detect delimiter
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
         sample = f.readline()
-    sep = csv.Sniffer().sniff(sample, delimiters=",;").delimiter
+    delim = csv.Sniffer().sniff(sample, delimiters=",;").delimiter
 
     # Raw read to find header row
-    raw = pd.read_csv(path, sep=sep, header=None, dtype=str, na_filter=False)
-    hdr_idx = raw[raw.iloc[:, 0].str.strip().str.match(r"Date", case=False)].index
-    if hdr_idx.empty:
-        st.error("Could not locate the 'Date' header row.")
+    raw = pd.read_csv(path, sep=delim, header=None, dtype=str, na_filter=False)
+    hdr = raw[raw.iloc[:, 0].str.strip().str.match(r"Date", case=False)].index
+    if hdr.empty:
+        st.error("Could not find 'Date' header row.")
         st.stop()
-    skip = hdr_idx[0]
+    skip = hdr[0]
 
     # Read with real header
-    df = pd.read_csv(path, sep=sep, skiprows=skip, low_memory=False)
+    df = pd.read_csv(path, sep=delim, skiprows=skip, low_memory=False)
     df.columns = df.columns.str.strip()
-
-    # Drop Status and Unnamed filler columns
     df = df.loc[:, ~df.columns.str.contains(r"Status|^Unnamed", case=False)]
 
     # Build Datetime
-    if {"Date", "Time"}.issubset(df.columns):
+    if {"Date","Time"}.issubset(df.columns):
         df.insert(0, "Datetime", pd.to_datetime(
             df["Date"].str.strip() + " " + df["Time"].str.strip(),
             dayfirst=True, errors="coerce"
         ))
-        df = df.drop(columns=["Date", "Time"]).dropna(subset=["Datetime"])
+        df = df.drop(columns=["Date","Time"]).dropna(subset=["Datetime"])
 
-    # Rename pollutant columns by substring
+    # Rename pollutant columns
     rename = {}
-    for col in df.columns:
-        low = col.lower()
-        if "nitrogen dioxide" in low:
-            rename[col] = "Nitrogen dioxide"
-        elif "pm10" in low:
-            rename[col] = "PM10"
-        elif "pm2.5" in low or "pm25" in low:
-            rename[col] = "PM2.5"
+    for c in df.columns:
+        lc = c.lower()
+        if "nitrogen dioxide" in lc:
+            rename[c] = "Nitrogen dioxide"
+        elif "pm10" in lc:
+            rename[c] = "PM10"
+        elif "pm2.5" in lc or "pm25" in lc:
+            rename[c] = "PM2.5"
     df = df.rename(columns=rename)
 
-    # Force pollutant columns to numeric (comma→dot)
-    for pol in ["Nitrogen dioxide", "PM10", "PM2.5"]:
-        if pol in df.columns:
-            df[pol] = (
-                df[pol].astype(str)
-                      .str.replace(",", ".", regex=False)
-                      .pipe(pd.to_numeric, errors="coerce")
+    # Numeric conversion
+    for p in ["Nitrogen dioxide","PM10","PM2.5"]:
+        if p in df.columns:
+            df[p] = (
+                df[p].astype(str)
+                     .str.replace(",", ".", regex=False)
+                     .pipe(pd.to_numeric, errors="coerce")
             )
-    # Drop rows where all pollutant values are missing
-    present = [pol for pol in ["Nitrogen dioxide", "PM10", "PM2.5"] if pol in df.columns]
+    present = [p for p in ["Nitrogen dioxide","PM10","PM2.5"] if p in df.columns]
     if present:
         df = df.dropna(subset=present, how="all")
 
     # Sort chronologically
     if "Datetime" in df.columns:
         df = df.sort_values("Datetime")
+
     return df
 
-# ── Load data ───────────────────────────────────────────────────────
+# ── Load data ────────────────────────────────────────────────────────
 upload = st.sidebar.file_uploader("Upload UK-Air CSV", type="csv")
-if upload is not None:
-    tmp = Path("_tmp.csv")
-    tmp.write_bytes(upload.getbuffer())
-    csv_path = str(tmp)
+if upload:
+    tmp = Path("_tmp.csv"); tmp.write_bytes(upload.getbuffer())
+    path = str(tmp)
 else:
-    csv_path = str(DEFAULT_CSV)
+    path = str(DEFAULT_CSV)
 
-df = load_and_clean(csv_path)
-
-# Ensure datetime column exists
+df = load_and_clean(path)
 if "Datetime" not in df.columns:
-    st.error("No 'Datetime' column parsed — cannot proceed.")
+    st.error("No Datetime—cannot proceed.")
     st.stop()
 
 # ── Sidebar Controls & Downloads ────────────────────────────────────
@@ -95,37 +90,28 @@ st.sidebar.download_button(
     file_name="aq_raw_filtered.csv"
 )
 
-pollutants = [c for c in ["Nitrogen dioxide", "PM10", "PM2.5"] if c in df.columns]
-selected = st.sidebar.multiselect(
-    "Select pollutants to compare", pollutants, default=pollutants
-)
+pollutants = [c for c in ["Nitrogen dioxide","PM10","PM2.5"] if c in df.columns]
+selected   = st.sidebar.multiselect("Select pollutants to compare", pollutants, default=pollutants)
 if not selected:
     st.warning("Please select at least one pollutant.")
     st.stop()
 
-window = st.sidebar.slider("Rolling window (hours)", 1, 168, 24)
+window     = st.sidebar.slider("Rolling window (hours)", 1, 168, 24)
+thresholds = {p: st.sidebar.number_input(f"Threshold {p}", value=float(df[p].median() or 0)) for p in selected}
+agg        = st.sidebar.radio("Aggregate to", ["raw","hourly","daily"], horizontal=True)
+theme      = st.sidebar.radio("Theme", ["Light","Dark"], index=0)
+palette    = st.sidebar.selectbox("Palette", ["Default","Viridis","Category10"], index=0)
 
-thresholds = {}
-for pol in selected:
-    thresholds[pol] = st.sidebar.number_input(
-        f"Alert threshold for {pol}",
-        value=float(df[pol].median() or 0.0)
-    )
+scheme = None
+if palette == "Viridis":
+    scheme = "viridis"
+elif palette == "Category10":
+    scheme = "category10"
 
-agg = st.sidebar.radio("Aggregate to…", ["raw", "hourly", "daily"], horizontal=True)
-
-# 8) Theme & Palette
-theme = st.sidebar.radio("Theme", ["Light", "Dark"], index=0)
-palette = st.sidebar.selectbox(
-    "Color palette",
-    ["Default", "Viridis", "Category10"],
-    index=0
-)
-
-# ── Data Processing ───────────────────────────────────────────────── ─────────────────────────────────────────────────
+# ── Data processing ─────────────────────────────────────────────────
 plot_df = df[["Datetime"] + selected].copy()
 if agg != "raw":
-    rule = {"hourly": "h", "daily": "d"}[agg]
+    rule = {"hourly":"h","daily":"d"}[agg]
     plot_df = (
         plot_df.set_index("Datetime")[selected]
                .resample(rule).mean().interpolate()
@@ -144,88 +130,92 @@ st.sidebar.download_button(
     file_name="aq_agg_filtered.csv"
 )
 
-# ── KPI Cards & Alerts ──────────────────────────────────────────────
-st.title("🌍 UK-Air Hourly Dashboard")
-st.markdown(f"**Rows:** {len(df):,}")
-st.dataframe(df.head(10), use_container_width=True)
-
+# ── KPI Cards & Alerts ───────────────────────────────────────────────
+st.title("🌍 UK-Air Dashboard")
+st.markdown(f"Rows: {len(df):,}")
 cols = st.columns(len(selected))
-for col, pol in zip(cols, selected):
-    latest = plot_df[pol].iloc[-1]
-    pct_above = (plot_df[pol] > thresholds[pol]).mean() * 100
-    col.metric(f"Latest {pol}", f"{latest:.2f}")
-    col.metric(f"% {pol} > {thresholds[pol]}", f"{pct_above:.1f}%")
-    if latest > thresholds[pol]:
-        st.error(f"Latest {pol} = {latest:.2f} above threshold {thresholds[pol]}!")
+for col, p in zip(cols, selected):
+    val = plot_df[p].iloc[-1]
+    pct = (plot_df[p] > thresholds[p]).mean() * 100
+    col.metric(f"Latest {p}", f"{val:.2f}")
+    col.metric(f"% >{thresholds[p]}", f"{pct:.1f}%")
+    if val > thresholds[p]:
+        st.error(f"{p} {val:.2f} > {thresholds[p]}")
 
-# ── Multi-Pollutant Overlay ─────────────────────────────────────────
+# ── Prepare for plotting ────────────────────────────────────────────
 long_df = plot_df.melt(
-    id_vars=["Datetime"],
-    value_vars=selected,
-    var_name="Pollutant",
-    value_name="Value"
+    id_vars=["Datetime"], value_vars=selected,
+    var_name="Pollutant", value_name="Value"
 )
-chart = alt.Chart(long_df).mark_line(point=True).encode(
-    x=alt.X("Datetime:T", title="Time"),
-    y=alt.Y("Value:Q", title="Value"),
-    color=alt.Color("Pollutant:N", title="Pollutant"),
-    tooltip=["Datetime:T", "Pollutant:N", "Value:Q"]
-).interactive().properties(height=400)
+
+# ── 9) Anomalies & trend lines ──────────────────────────────────────
+z_th = st.sidebar.slider("Anomaly z-score threshold", 1.0, 5.0, 2.0)
+long_df["zscore"] = long_df.groupby("Pollutant")["Value"].transform(
+    lambda x: (x - x.mean()) / x.std()
+)
+
+base   = alt.Chart(long_df).encode(
+    x="Datetime:T",
+    y="Value:Q",
+    color=alt.Color("Pollutant:N", scale=alt.Scale(scheme=scheme)) if scheme else alt.Color("Pollutant:N"),
+    tooltip=["Datetime:T","Pollutant:N","Value:Q","zscore:Q"]
+)
+lines  = base.mark_line()
+points = base.mark_point(color="red", size=60).transform_filter(f"abs(datum.zscore) > {z_th}")
+trends = base.transform_regression("Datetime","Value", groupby=["Pollutant"]) \
+             .mark_line(strokeDash=[5,5])
+
+chart = alt.layer(lines, trends, points).interactive().properties(height=400)
+if theme == "Dark":
+    chart = chart.configure_view(stroke="white")
 st.altair_chart(chart, use_container_width=True)
 
-# ── Display Processed Table ─────────────────────────────────────────
+# ── Display processed table ──────────────────────────────────────────
 st.dataframe(plot_df, use_container_width=True)
 
-# ── Time-of-Day Heatmap ─────────────────────────────────────────────
-p0 = selected[0]
-df_h = df[["Datetime", p0]].dropna().copy()
-df_h["hour"] = df_h["Datetime"].dt.hour
-df_h["weekday"] = pd.Categorical(
-    df_h["Datetime"].dt.day_name(),
-    categories=list(calendar.day_name), ordered=True
+# ── Heatmaps ────────────────────────────────────────────────────────
+p0    = selected[0]
+dh    = df[["Datetime", p0]].dropna().copy()
+dh["hour"]    = dh["Datetime"].dt.hour
+dh["weekday"] = pd.Categorical(
+    dh["Datetime"].dt.day_name(), categories=list(calendar.day_name), ordered=True
 )
-h1 = df_h.groupby(["weekday", "hour"], observed=True)[p0].mean().reset_index()
+h1 = dh.groupby(["weekday","hour"], observed=True)[p0].mean().reset_index()
 heatmap1 = alt.Chart(h1).mark_rect().encode(
-    x=alt.X("hour:O", title="Hour of Day"),
-    y=alt.Y("weekday:N", title="Weekday", sort=list(calendar.day_name)),
-    color=alt.Color(f"{p0}:Q", title=f"{p0} avg"),
-    tooltip=["weekday", "hour", alt.Tooltip(f"{p0}:Q")]
+    x="hour:O",
+    y=alt.Y("weekday:N", sort=list(calendar.day_name)),
+    color=alt.Color(f"{p0}:Q", scale=alt.Scale(scheme=scheme)) if scheme else alt.Color(f"{p0}:Q"),
+    tooltip=["weekday","hour", alt.Tooltip(f"{p0}:Q")]
 ).properties(height=250)
 st.subheader(f"Heatmap: {p0} by Hour & Weekday")
 st.altair_chart(heatmap1, use_container_width=True)
 
-# ── Monthly Heatmap ────────────────────────────────────────────────
-df_m = df_h.copy()
-df_m["day"] = df_m["Datetime"].dt.day
+df_m      = dh.copy()
+df_m["day"]   = df_m["Datetime"].dt.day
 df_m["month"] = pd.Categorical(
-    df_m["Datetime"].dt.month_name(),
-    categories=list(calendar.month_name)[1:], ordered=True
+    df_m["Datetime"].dt.month_name(), categories=list(calendar.month_name)[1:], ordered=True
 )
-h2 = df_m.groupby(["month", "day"], observed=True)[p0].mean().reset_index()
+h2 = df_m.groupby(["month","day"], observed=True)[p0].mean().reset_index()
 heatmap2 = alt.Chart(h2).mark_rect().encode(
-    x=alt.X("day:O", title="Day of Month"),
-    y=alt.Y("month:N", title="Month", sort=list(calendar.month_name)[1:]),
-    color=alt.Color(f"{p0}:Q", title=f"{p0} avg"),
-    tooltip=["month", "day", alt.Tooltip(f"{p0}:Q")]
+    x="day:O",
+    y=alt.Y("month:N", sort=list(calendar.month_name)[1:]),
+    color=alt.Color(f"{p0}:Q", scale=alt.Scale(scheme=scheme)) if scheme else alt.Color(f"{p0}:Q"),
+    tooltip=["month","day", alt.Tooltip(f"{p0}:Q")]
 ).properties(height=250)
 st.subheader(f"Heatmap: {p0} by Day & Month")
 st.altair_chart(heatmap2, use_container_width=True)
 
-# ── Statistical Summary Table ───────────────────────────────────────
+# ── Statistical Summary ─────────────────────────────────────────────
 st.subheader("Statistical Summary")
-st.table(
-    df[selected].agg(["mean", "median", "min", "max", "std"]).T
-)
+st.table(df[selected].agg(["mean","median","min","max","std"]).T)
 
 # ── Station Map ─────────────────────────────────────────────────────
 if "latitude" in df.columns and "longitude" in df.columns:
     st.subheader("Station Locations")
-    pts = df[["latitude", "longitude"]].dropna().drop_duplicates()
+    pts = df[["latitude","longitude"]].dropna().drop_duplicates()
     st.map(pts)
 else:
-    st.info("No latitude/longitude data available for station map.")
+    st.info("No geo data for map.")
 
 # ── Feature Caption ─────────────────────────────────────────────────
-st.caption(
-    "Features: downloads · overlay · rolling · thresholds/KPIs · heatmaps · stats summary · station map"
-)
+st.caption("Features: downloads · overlay · rolling · thresholds/KPIs · anomalies/trends · heatmaps · stats · station map")
