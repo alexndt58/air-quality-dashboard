@@ -33,6 +33,7 @@ def load_and_clean(path):
     df.columns = df.columns.str.strip()
     df = df.loc[:, ~df.columns.str.contains(r"Status|^Unnamed", case=False)]
 
+    # Build Datetime column
     if {"Date","Time"}.issubset(df.columns):
         df.insert(0, "Datetime", pd.to_datetime(
             df["Date"].str.strip() + " " + df["Time"].str.strip(),
@@ -40,6 +41,7 @@ def load_and_clean(path):
         ))
         df = df.drop(columns=["Date","Time"]).dropna(subset=["Datetime"])
 
+    # Rename pollutant columns
     rename = {}
     for c in df.columns:
         lc = c.lower()
@@ -51,6 +53,7 @@ def load_and_clean(path):
             rename[c] = "PM2.5"
     df = df.rename(columns=rename)
 
+    # Convert to numeric
     for p in ["Nitrogen dioxide","PM10","PM2.5"]:
         if p in df.columns:
             df[p] = (
@@ -62,14 +65,17 @@ def load_and_clean(path):
     if pres:
         df = df.dropna(subset=pres, how="all")
 
+    # Sort by datetime
     if "Datetime" in df.columns:
         df = df.sort_values("Datetime")
     return df
 
-# ── Load & Timestamp ────────────────────────────────────────────────
+# ── Load data & timestamp ──────────────────────────────────────────
 upload = st.sidebar.file_uploader("Upload CSV", type="csv")
 if upload:
-    tmp = Path("_tmp.csv"); tmp.write_bytes(upload.getbuffer()); path = str(tmp)
+    tmp = Path("_tmp.csv")
+    tmp.write_bytes(upload.getbuffer())
+    path = str(tmp)
 else:
     path = str(DEFAULT_CSV)
 
@@ -79,118 +85,122 @@ st.sidebar.markdown(f"**Last updated:** {last_dt:%Y-%m-%d %H:%M:%S}")
 if st.sidebar.button("Refresh Data"):
     st.experimental_rerun()
 
+# ── Read DataFrame ─────────────────────────────────────────────────
 df = load_and_clean(path)
 if "Datetime" not in df.columns:
-    st.error("No Datetime—cannot proceed.")
+    st.error("No Datetime column—cannot proceed.")
     st.stop()
 
 # ── Sidebar Controls ────────────────────────────────────────────────
-st.sidebar.download_button("Download raw filtered data",
-                            df.to_csv(index=False).encode(),
-                            file_name="aq_raw.csv")
+st.sidebar.download_button(
+    "Download raw filtered data",
+    df.to_csv(index=False).encode(),
+    file_name="aq_raw_filtered.csv"
+)
+
+# Pollutant selection, rolling, thresholds, aggregation, theming
 pollutants = [c for c in ["Nitrogen dioxide","PM10","PM2.5"] if c in df.columns]
-selected = st.sidebar.multiselect("Select pollutants to compare", pollutants, default=pollutants)
+selected   = st.sidebar.multiselect("Select pollutants", pollutants, default=pollutants)
 if not selected:
     st.warning("Select at least one pollutant.")
     st.stop()
-window = st.sidebar.slider("Rolling window (hours)", 1, 168, 24)
+window     = st.sidebar.slider("Rolling window (hours)", 1, 168, 24)
 thresholds = {p: st.sidebar.number_input(f"Threshold {p}", value=float(df[p].median() or 0)) for p in selected}
-agg = st.sidebar.radio("Aggregate to", ["raw","hourly","daily"], horizontal=True)
-theme = st.sidebar.radio("Theme", ["Light","Dark"], index=0)
-palette = st.sidebar.selectbox("Palette", ["Default","Viridis","Category10"], index=0)
-slack_url = st.sidebar.text_input("Slack webhook URL (optional)")
-email_enable = st.sidebar.checkbox("Enable email notifications")
-email_to = st.sidebar.text_input("Notification email") if email_enable else None
+agg        = st.sidebar.radio("Aggregate to", ["raw","hourly","daily"], horizontal=True)
+theme      = st.sidebar.radio("Theme", ["Light","Dark"], index=0)
+palette    = st.sidebar.selectbox("Palette", ["Default","Viridis","Category10"], index=0)
 
 scheme = None
 if palette == "Viridis": scheme = "viridis"
 elif palette == "Category10": scheme = "category10"
 
-# ── Data Processing ─────────────────────────────────────────────────
+# ── Process data ────────────────────────────────────────────────────
 plot_df = df[["Datetime"] + selected].copy()
 if agg != "raw":
     rule = {"hourly":"h","daily":"d"}[agg]
-    plot_df = (plot_df.set_index("Datetime")[selected]
-                   .resample(rule).mean().interpolate().reset_index())
+    plot_df = plot_df.set_index("Datetime")[selected].resample(rule).mean().interpolate().reset_index()
 if window > 1:
-    plot_df = (plot_df.set_index("Datetime")[selected]
-                   .rolling(f"{window}h").mean().reset_index())
-st.sidebar.download_button("Download aggregated data",
-                            plot_df.to_csv(index=False).encode(),
-                            file_name="aq_agg.csv")
+    plot_df = plot_df.set_index("Datetime")[selected].rolling(f"{window}h").mean().reset_index()
 
-# ── KPI Cards & Notify ──────────────────────────────────────────────
-st.title("🌍 Air Dashboard")
+st.sidebar.download_button(
+    "Download aggregated data",
+    plot_df.to_csv(index=False).encode(),
+    file_name="aq_agg_filtered.csv"
+)
+
+# ── KPI Cards & Alerts ──────────────────────────────────────────────
+st.title("🌍 Air Quality Dashboard")
 st.markdown(f"Rows: {len(df):,}")
-notified = st.session_state.setdefault("notified", set())
 cols = st.columns(len(selected))
-for col,p in zip(cols,selected):
+for col, p in zip(cols, selected):
     latest = plot_df[p].iloc[-1]
-    pct = (plot_df[p] > thresholds[p]).mean()*100
+    pct    = (plot_df[p] > thresholds[p]).mean() * 100
     col.metric(f"Latest {p}", f"{latest:.2f}")
-    col.metric(f"%>{thresholds[p]}", f"{pct:.1f}%")
-    if latest > thresholds[p] and p not in notified:
+    col.metric(f"% >{thresholds[p]}", f"{pct:.1f}%")
+    if latest > thresholds[p]:
         st.error(f"{p} {latest:.2f} > {thresholds[p]}")
-        if slack_url:
-            try: requests.post(slack_url, json={"text":f"Alert: {p} {latest:.2f}>{thresholds[p]}"})
-            except: st.warning("Slack failed")
-        if email_enable and email_to:
-            try:
-                msg=EmailMessage(); msg.set_content(f"{p}:{latest:.2f}>")
-                msg["Subject"]=f"AQ Alert:{p}"; msg["From"]=st.secrets.smtp.user; msg["To"]=email_to
-                with smtplib.SMTP(st.secrets.smtp.server,st.secrets.smtp.port) as s:
-                    s.starttls(); s.login(st.secrets.smtp.user,st.secrets.smtp.password)
-                    s.send_message(msg)
-            except: st.warning("Email failed")
-        notified.add(p)
 
-# ── Plot prep ───────────────────────────────────────────────────────
-long_df = plot_df.melt(id_vars=["Datetime"], value_vars=selected,
-                       var_name="Pollutant", value_name="Value")
-# anomalies & trends
-z_th = st.sidebar.slider("Anomaly z-score",1.0,5.0,2.0)
-long_df['zscore'] = long_df.groupby('Pollutant')['Value'].transform(lambda x:(x-x.mean())/x.std())
-base = alt.Chart(long_df).encode(x="Datetime:T",y="Value:Q",
-    color=alt.Color("Pollutant:N",scale=alt.Scale(scheme=scheme)) if scheme else alt.Color("Pollutant:N"),
-    tooltip=["Datetime:T","Pollutant:N","Value:Q","zscore:Q"] )
-lines = base.mark_line()
-points=base.mark_point(color='red',size=60).transform_filter(f"abs(datum.zscore)>{z_th}")
-trends=base.transform_regression('Datetime','Value',groupby=['Pollutant']).mark_line(strokeDash=[5,5])
-chart=alt.layer(lines,trends,points).interactive().properties(height=300)
-if theme=='Dark': chart=chart.configure_view(stroke='white').configure_axis(labelColor='white',titleColor='white')
-st.altair_chart(chart,use_container_width=True)
+# ── Plot anomalies & trends ─────────────────────────────────────────
+long_df = plot_df.melt(id_vars=["Datetime"], value_vars=selected, var_name="Pollutant", value_name="Value")
+z_th    = st.sidebar.slider("Anomaly z-score threshold", 1.0, 5.0, 2.0)
+long_df["zscore"] = long_df.groupby("Pollutant")["Value"].transform(lambda x: (x - x.mean()) / x.std())
 
-# ── Table ───────────────────────────────────────────────────────────
-st.dataframe(plot_df,use_container_width=True)
+base   = alt.Chart(long_df).encode(
+    x="Datetime:T",
+    y="Value:Q",
+    color=alt.Color("Pollutant:N", scale=alt.Scale(scheme=scheme)) if scheme else alt.Color("Pollutant:N"),
+    tooltip=["Datetime:T","Pollutant:N","Value:Q","zscore:Q"]
+)
+lines  = base.mark_line()
+points = base.mark_point(color="red", size=60).transform_filter(f"abs(datum.zscore) > {z_th}")
+trends = base.transform_regression("Datetime","Value",groupby=["Pollutant"]).mark_line(strokeDash=[5,5])
+chart  = alt.layer(lines, trends, points).interactive().properties(height=400)
+if theme == "Dark":
+    chart = chart.configure_view(stroke="white").configure_axis(labelColor="white", titleColor="white")
+st.altair_chart(chart, use_container_width=True)
+
+# ── Data table ─────────────────────────────────────────────────────
+st.dataframe(plot_df, use_container_width=True)
 
 # ── Heatmaps ───────────────────────────────────────────────────────
-p0=selected[0];dh=df[['Datetime',p0]].dropna().copy();dh['hour']=dh['Datetime'].dt.hour;dh['weekday']=pd.Categorical(dh['Datetime'].dt.day_name(),categories=list(calendar.day_name),ordered=True)
-h1=dh.groupby(['weekday','hour'],observed=True)[p0].mean().reset_index()
-heatmap1=alt.Chart(h1).mark_rect().encode(x='hour:O',y=alt.Y('weekday:N',sort=list(calendar.day_name)),
-    color=alt.Color(f"{p0}:Q",scale=alt.Scale(scheme=scheme)) if scheme else alt.Color(f"{p0}:Q"),
-    tooltip=['weekday','hour',alt.Tooltip(f"{p0}:Q")]).properties(height=200)
-st.subheader(f"Heatmap:{p0} by Hour")
-st.altair_chart(heatmap1,use_container_width=True)
+p0  = selected[0]
+dh  = df[["Datetime", p0]].dropna().copy()
+dh["hour"]    = dh["Datetime"].dt.hour
+dh["weekday"] = pd.Categorical(dh["Datetime"].dt.day_name(), categories=list(calendar.day_name), ordered=True)
+h1  = dh.groupby(["weekday","hour"], observed=True)[p0].mean().reset_index()
+heatmap1 = alt.Chart(h1).mark_rect().encode(
+    x='hour:O', y=alt.Y('weekday:N', sort=list(calendar.day_name)),
+    color=alt.Color(f"{p0}:Q", scale=alt.Scale(scheme=scheme)) if scheme else alt.Color(f"{p0}:Q"),
+    tooltip=['weekday','hour', alt.Tooltip(f"{p0}:Q")]
+).properties(height=250)
+st.subheader(f"Heatmap: {p0} by Hour & Weekday")
+st.altair_chart(heatmap1, use_container_width=True)
 
-df_m=dh.copy();df_m['day']=df_m['Datetime'].dt.day;df_m['month']=pd.Categorical(df_m['Datetime'].dt.month_name(),categories=list(calendar.month_name)[1:],ordered=True)
-h2=df_m.groupby(['month','day'],observed=True)[p0].mean().reset_index()
-heatmap2=alt.Chart(h2).mark_rect().encode(x='day:O',y=alt.Y('month:N',sort=list(calendar.month_name)[1:]),
-    color=alt.Color(f"{p0}:Q",scale=alt.Scale(scheme=scheme)) if scheme else alt.Color(f"{p0}:Q"),
-    tooltip=['month','day',alt.Tooltip(f"{p0}:Q")]).properties(height=200)
-st.subheader(f"Heatmap:{p0} by Day")
-st.altair_chart(heatmap2,use_container_width=True)
+# Monthly heatmap
+df_m            = dh.copy()
+df_m['day']     = df_m['Datetime'].dt.day
+df_m['month']   = pd.Categorical(df_m['Datetime'].dt.month_name(), categories=list(calendar.month_name)[1:], ordered=True)
+h2  = df_m.groupby(['month','day'], observed=True)[p0].mean().reset_index()
+heatmap2 = alt.Chart(h2).mark_rect().encode(
+    x='day:O',
+    y=alt.Y('month:N', sort=list(calendar.month_name)[1:]),
+    color=alt.Color(f"{p0}:Q", scale=alt.Scale(scheme=scheme)) if scheme else alt.Color(f"{p0}:Q"),
+    tooltip=['month','day', alt.Tooltip(f"{p0}:Q")]
+).properties(height=250)
+st.subheader(f"Heatmap: {p0} by Day & Month")
+st.altair_chart(heatmap2, use_container_width=True)
 
-# ── Stats ───────────────────────────────────────────────────────────
-st.subheader("Stats Summary")
+# ── Statistical Summary ─────────────────────────────────────────────
+st.subheader("Statistical Summary")
 st.table(df[selected].agg(["mean","median","min","max","std"]).T)
 
-# ── Map ─────────────────────────────────────────────────────────────
-if 'latitude'in df.columns and 'longitude'in df.columns:
-    st.subheader('Map')
-    pts=df[['latitude','longitude']].dropna().drop_duplicates()
+# ── Station Map ─────────────────────────────────────────────────────
+if 'latitude' in df.columns and 'longitude' in df.columns:
+    st.subheader('Station Locations')
+    pts = df[['latitude','longitude']].dropna().drop_duplicates()
     st.map(pts)
 else:
-    st.info('No geo data')
+    st.info('No geo data for map.')
 
-# ── Caption ─────────────────────────────────────────────────────────
-st.caption("Features: last-updated · refresh · downloads · overlay · rolling · thresholds · notifications · anomalies · heatmaps · stats · map")
+# ── Feature Caption ─────────────────────────────────────────────────
+st.caption("Features: last-updated · refresh · downloads · overlay · rolling · thresholds/KPIs · anomalies/trends · heatmaps · stats · station map")
