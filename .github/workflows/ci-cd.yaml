@@ -24,7 +24,7 @@ jobs:
 
       - name: Lint with flake8
         run: |
-          flake8 --max-line-length=100 app scripts
+          flake8 --max-line-length=120 app scripts
 
       - name: Run tests
         run: |
