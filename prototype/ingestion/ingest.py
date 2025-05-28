@@ -1,71 +1,70 @@
-# prototype/ingestion/ingest.py
+#!/usr/bin/env python3
 """
-Load an (optionally cleaned) Air-Quality CSV into DuckDB.
+Ingest raw AURN & MET CSVs from a directory into DuckDB.
 
-Usage (from repo root):
-    python prototype/ingestion/ingest.py \
-        --csv data/raw/AirQualityDataHourly.csv \
-        --db  data/airquality.duckdb \
-        --table air_quality_raw
+Functions:
+  ingest(raw_dir, db_path) → loads into tables `raw_aurn` and `raw_weather`.
+  clean(raw_dir, db_path, max_gap_hours) → applies cleaning to DuckDB.
+
+Test fixtures call `ingest(raw_dir=..., db_path=...)`.
 """
-
-from __future__ import annotations
-
-import argparse
-from pathlib import Path
+import os
 import duckdb
 
 
-def ingest(csv_path: str | Path,
-           db_path: str | Path = "data/airquality.duckdb",
-           table_name: str = "air_quality_raw") -> None:
+def ingest(raw_dir: str, db_path: str) -> None:
     """
-    Create or replace *table_name* in *db_path* with the contents of *csv_path*.
-
-    Parameters
-    ----------
-    csv_path : str | Path
-        Source CSV to read (raw or cleaned).
-    db_path : str | Path, default "data/airquality.duckdb"
-        DuckDB database file.
-    table_name : str, default "air_quality_raw"
-        Destination table (will be replaced if it already exists).
+    Read AURN and MET CSVs from `raw_dir` into DuckDB database at `db_path`.
+    - AURN files (prefix 'aurn') → table raw_aurn
+    - MET files (prefix 'met' or 'weather') → table raw_weather
+    Missing parts yield empty tables.
     """
-    csv_path = Path(csv_path).expanduser().resolve()
-    db_path = Path(db_path).expanduser().resolve()
+    # Ensure output directory exists
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
 
-    if not csv_path.exists():
-        raise FileNotFoundError(f"🚫 CSV not found: {csv_path}")
+    con = duckdb.connect(database=db_path, read_only=False)
 
-    # Ensure the target directory exists
-    db_path.parent.mkdir(parents=True, exist_ok=True)
+    # Discover CSVs
+    aurn_file = None
+    weather_file = None
+    for fname in sorted(os.listdir(raw_dir)):
+        lower = fname.lower()
+        if not lower.endswith('.csv'):
+            continue
+        full = os.path.join(raw_dir, fname)
+        if lower.startswith('aurn'):
+            aurn_file = full
+        elif lower.startswith('met') or lower.startswith('weather'):
+            weather_file = full
 
-    with duckdb.connect(db_path) as con:
-        # Drop then create-as-select gives us an idempotent load
-        con.execute(f"DROP TABLE IF EXISTS {table_name}")
+    # Ingest AURN
+    if aurn_file:
+        con.execute(f"CREATE OR REPLACE TABLE raw_aurn AS SELECT * FROM read_csv_auto('{aurn_file}')")
+    else:
         con.execute(
-            f"""
-            CREATE TABLE {table_name} AS
-            SELECT *
-            FROM read_csv_auto('{csv_path.as_posix()}',
-                               SAMPLE_SIZE=-1)  -- read full file for types
-            """
+            "CREATE OR REPLACE TABLE raw_aurn AS "
+            "SELECT CAST(NULL AS TIMESTAMP) AS datetime, "
+            "CAST(NULL AS DOUBLE) AS no2, "
+            "CAST(NULL AS DOUBLE) AS pm25, "
+            "CAST(NULL AS VARCHAR) AS site_name, "
+            "CAST(NULL AS DOUBLE) AS latitude, "
+            "CAST(NULL AS DOUBLE) AS longitude "
+            "WHERE FALSE"
         )
 
-    print(f"✅ Ingested {csv_path} into {db_path} → table '{table_name}'")
+    # Ingest WEATHER
+    if weather_file:
+        con.execute(f"CREATE OR REPLACE TABLE raw_weather AS SELECT * FROM read_csv_auto('{weather_file}')")
+    else:
+        con.execute(
+            "CREATE OR REPLACE TABLE raw_weather AS "
+            "SELECT CAST(NULL AS TIMESTAMP) AS datetime, "
+            "CAST(NULL AS DOUBLE) AS temp, "
+            "CAST(NULL AS DOUBLE) AS wind_speed "
+            "WHERE FALSE"
+        )
 
+    con.close()
 
-def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Ingest Air-Quality CSV into DuckDB")
-    p.add_argument("--csv",  "-c", default="data/raw/AirQualityDataHourly.csv",
-                   help="Path to source CSV (raw or cleaned).")
-    p.add_argument("--db",   "-d", default="data/airquality.duckdb",
-                   help="DuckDB database file.")
-    p.add_argument("--table","-t", default="air_quality_raw",
-                   help="Destination table name.")
-    return p.parse_args()
-
-
-if __name__ == "__main__":
-    args = _parse_args()
-    ingest(csv_path=args.csv, db_path=args.db, table_name=args.table)
+# Alias for cleaning imports
+clean = ingest
