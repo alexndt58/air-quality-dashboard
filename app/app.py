@@ -114,7 +114,15 @@ for pol in selected:
 
 agg = st.sidebar.radio("Aggregate to…", ["raw", "hourly", "daily"], horizontal=True)
 
-# ── Data Processing ─────────────────────────────────────────────────
+# 8) Theme & Palette
+theme = st.sidebar.radio("Theme", ["Light", "Dark"], index=0)
+palette = st.sidebar.selectbox(
+    "Color palette",
+    ["Default", "Viridis", "Category10"],
+    index=0
+)
+
+# ── Data Processing ───────────────────────────────────────────────── ─────────────────────────────────────────────────
 plot_df = df[["Datetime"] + selected].copy()
 if agg != "raw":
     rule = {"hourly": "h", "daily": "d"}[agg]
