@@ -73,17 +73,30 @@ def load_and_clean(path: str) -> pd.DataFrame:
     df = df.sort_values("Datetime").reset_index(drop=True)
     return df
 
-# ── Load data & timestamp ─────────────────────────────────────────────
-if not DEFAULT_CSV.exists():
-    st.error(f"Data file not found at {DEFAULT_CSV}")
-    st.stop()
-file_time = datetime.fromtimestamp(DEFAULT_CSV.stat().st_mtime)
-st.sidebar.markdown(f"**Last updated:** {file_time:%Y-%m-%d %H:%M:%S}")
-if st.sidebar.button("Refresh Data"):
-    st.experimental_rerun()
+# ── Data source selection ─────────────────────────────────────────────
 
-# Load dataframe
-df = load_and_clean(str(DEFAULT_CSV))
+# Allow users to upload a CSV; otherwise fall back to default file
+upload = st.sidebar.file_uploader("Upload UK-Air CSV", type="csv")
+if upload is not None:
+    # use uploaded file
+    df = load_and_clean(upload)
+    st.sidebar.success("Using uploaded CSV")
+else:
+    default = DEFAULT_CSV
+    if default.exists():
+        df = load_and_clean(str(default))
+        file_time = datetime.fromtimestamp(default.stat().st_mtime)
+        st.sidebar.markdown(f"**Last updated:** {file_time:%Y-%m-%d %H:%M:%S}")
+        if st.sidebar.button("Refresh Data"):
+            st.experimental_rerun()
+    else:
+        st.sidebar.error("No default data file found. Please upload a CSV.")
+        st.stop()
+
+# Ensure DataFrame loaded correctly
+if df.empty:
+    st.error("Loaded data is empty.")
+    st.stop()(str(DEFAULT_CSV))
 
 # ── Sidebar Controls ─────────────────────────────────────────────────
 st.sidebar.download_button(
