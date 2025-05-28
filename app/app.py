@@ -1,111 +1,137 @@
-# app/app.py
 import streamlit as st
 import pandas as pd
-import re
+import altair as alt
+import csv, re, warnings
 from pathlib import Path
 
-# ── Settings ──────────────────────────────────────────────────────────────────
-DATA_PATH = Path("data/clean/clean_air_quality.csv")   # created by clean.py
+# ── Basic Streamlit setup ──────────────────────────────────────────
+st.set_page_config("Air-Quality Dashboard", "🌍", layout="wide")
+warnings.filterwarnings("ignore", category=UserWarning)
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-@st.cache_data(show_spinner="Loading data…")
-def load_data(path: Path) -> pd.DataFrame:
-    """Read the cleaned CSV and return a typed DataFrame."""
-    df = pd.read_csv(path, parse_dates=["datetime"], dayfirst=True, low_memory=False)
+ROOT        = Path(__file__).resolve().parents[1]
+DEFAULT_CSV = ROOT / "data" / "raw" / "AirQualityDataHourly.csv"
 
-    # Fail fast if the file is missing or empty
-    if df.empty:
-        raise ValueError("The cleaned dataset is empty. "
-                         "Have you run `python run_pipeline.py`?")
+NUM_RE = re.compile(r"[-+]?\d+(?:[.,]\d+)?")  # matches dot or comma decimals
+
+@st.cache_data(show_spinner="📊 Loading data…")
+def load_and_clean(path):
+    # Sniff delimiter from first line
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        sample = f.readline()
+    sep = csv.Sniffer().sniff(sample, delimiters=",;").delimiter
+
+    # Raw read to find header row
+    raw = pd.read_csv(path, sep=sep, header=None, dtype=str, na_filter=False)
+    hdr_idx = raw[raw.iloc[:, 0].str.strip().str.match(r"Date", case=False)].index
+    if hdr_idx.empty:
+        st.error("Could not locate the 'Date' header row.")
+        st.stop()
+    skip = hdr_idx[0]
+
+    # Read with real header
+    df = pd.read_csv(path, sep=sep, skiprows=skip, low_memory=False)
+    df.columns = df.columns.str.strip()
+
+    # Drop Status and Unnamed columns
+    df = df.loc[:, ~df.columns.str.contains(r"Status|^Unnamed", case=False)]
+
+    # Build Datetime
+    if {"Date", "Time"}.issubset(df.columns):
+        df.insert(0, "Datetime", pd.to_datetime(
+            df["Date"].str.strip() + " " + df["Time"].str.strip(),
+            dayfirst=True, errors="coerce"
+        ))
+        df = df.drop(columns=["Date", "Time"]).dropna(subset=["Datetime"])
+
+    # Rename pollutant columns by substring
+    rename = {}
+    for col in df.columns:
+        low = col.lower()
+        if "nitrogen dioxide" in low:
+            rename[col] = "Nitrogen dioxide"
+        elif "pm10" in low:
+            rename[col] = "PM10"
+    df = df.rename(columns=rename)
+
+    # Force pollutants to numeric (comma→dot)
+    for pol in ["Nitrogen dioxide", "PM10"]:
+        if pol in df.columns:
+            df[pol] = (
+                df[pol].astype(str)
+                      .str.replace(",", ".", regex=False)
+                      .pipe(pd.to_numeric, errors="coerce")
+            )
+
+    # Drop rows where both pollutant values are missing
+    present = [pol for pol in ["Nitrogen dioxide", "PM10"] if pol in df.columns]
+    if present:
+        df = df.dropna(subset=present, how="all")
+
+    # Sort chronologically
+    if "Datetime" in df.columns:
+        df = df.sort_values("Datetime")
+
     return df
 
+# ── Load data ───────────────────────────────────────────────────────
+upload = st.sidebar.file_uploader("Upload UK-Air CSV", type="csv")
+if upload is not None:
+    tmp = Path("_tmp.csv")
+    tmp.write_bytes(upload.getbuffer())
+    csv_path = str(tmp)
+else:
+    csv_path = str(DEFAULT_CSV)
 
-def detect_pollutant_columns(df: pd.DataFrame) -> dict[str, str]:
-    """
-    Map pretty pollutant names → actual column names in *df*.
-
-    Returns
-    -------
-    dict
-        e.g. {"NO₂": "no2", "PM₁₀": "pm10", "PM₂.₅": "pm25"}
-    """
-    patterns = {
-        "NO₂":   re.compile(r"^no[\s_\.]?2$",            re.I),
-        "PM₁₀":  re.compile(r"^pm[\s_\.]?10$",           re.I),
-        "PM₂.₅": re.compile(r"^pm[\s_\.]?2[\s_\.]?5$",   re.I),
-    }
-    result: dict[str, str] = {}
-    for pretty, pat in patterns.items():
-        match = next((col for col in df.columns if pat.match(col.strip())), None)
-        if match:
-            result[pretty] = match
-    return result
-
-
-# ── Main ──────────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Air Quality Dashboard", layout="wide")
-st.title("🌤️  Air Quality Dashboard")
-
-# 1. Load data
+# Read & clean
 try:
-    df = load_data(DATA_PATH)
+    df = load_and_clean(csv_path)
 except Exception as e:
-    st.error(f"❌ **Failed to load data:** {e}")
+    st.error(f"Error loading CSV: {e}")
     st.stop()
 
-# 2. Detect pollutant columns
-pollutant_cols = detect_pollutant_columns(df)
-if not pollutant_cols:
-    st.error("❌ No pollutant columns recognised in the dataset. "
-             "Columns present: " + ", ".join(df.columns))
+st.title("🌍 UK-Air Hourly Dashboard")
+st.markdown(f"**Rows:** {len(df):,}")
+st.dataframe(df.head(10), use_container_width=True)
+
+if "Datetime" not in df.columns:
+    st.error("No Datetime column parsed — cannot plot.")
     st.stop()
 
-# 3. Sidebar – metadata & controls
-with st.sidebar:
-    st.header("Controls")
-
-    # Show detected columns (handy for debugging)
-    with st.expander("Columns in dataframe", expanded=False):
-        st.write(list(df.columns))
-
-    pollutant_pretty = st.selectbox("Pollutant", list(pollutant_cols.keys()))
-    pollutant_col    = pollutant_cols[pollutant_pretty]
-
-    # Optional date-range filter
-    min_date, max_date = df["datetime"].min(), df["datetime"].max()
-    start, end = st.date_input(
-        "Date range",
-        (min_date.date(), max_date.date()),
-        min_value=min_date.date(),
-        max_value=max_date.date(),
-    )
-    mask = df["datetime"].dt.date.between(start, end)
-    df = df.loc[mask]
-
-    # CSV download
-    st.download_button(
-        label="⬇️  Download filtered CSV",
-        data=df.to_csv(index=False).encode(),
-        file_name="air_quality_filtered.csv",
-        mime="text/csv",
-    )
-
-# 4. Optional site / location info
-site_name = next(
-    (df[c].iloc[0] for c in ("Site", "Site Name", "site", "site_name") if c in df.columns),
-    None,
+# ── Controls ───────────────────────────────────────────────────────
+pollutants = [pol for pol in ["Nitrogen dioxide", "PM10"] if pol in df.columns]
+counts = {pol: df[pol].notna().sum() for pol in pollutants}
+choice = st.sidebar.selectbox(
+    "Pollutant", [f"{pol} ({counts[pol]} valid)" for pol in pollutants]
 )
-if site_name:
-    st.markdown(f"**Location:** {site_name}")
+pol = choice.split(" (")[0]
 
-# 5. Time-series chart
-st.subheader(f"Time series – {pollutant_pretty}")
-st.line_chart(
-    df.set_index("datetime")[pollutant_col],
-    height=400,
+if counts[pol] == 0:
+    st.error(f"No valid data for {pol}.")
+    st.stop()
+
+agg = st.sidebar.radio("Aggregate", ["raw", "hourly", "daily"], horizontal=True)
+plot_df = df[["Datetime", pol]].copy()
+if agg != "raw":
+    rule = {"hourly": "h", "daily": "d"}[agg]
+    plot_df = (
+        plot_df.set_index("Datetime")[pol]
+               .resample(rule).mean().interpolate()
+               .reset_index()
+    )
+
+# ── Plot & Table ──────────────────────────────────────────────────
+st.altair_chart(
+    alt.Chart(plot_df)
+       .mark_line(point=True)
+       .encode(
+           x=alt.X("Datetime:T"),
+           y=alt.Y(f"{pol}:Q"),
+           tooltip=[alt.Tooltip("Datetime:T"), alt.Tooltip(f"{pol}:Q")],
+       )
+       .interactive()
+       .properties(height=400),
     use_container_width=True,
 )
+st.dataframe(plot_df, use_container_width=True)
 
-# 6. Raw data preview
-with st.expander("↕  Show raw data"):
-    st.dataframe(df, use_container_width=True)
+st.caption("Metadata skipped; Status/Unnamed dropped; pollutants coerced; live refresh every 60 s.")
