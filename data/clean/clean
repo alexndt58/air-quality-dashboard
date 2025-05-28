@@ -1,0 +1,25 @@
+import duckdb
+import pandas as pd
+
+
+def clean(db_path: str, max_gap_hours: int) -> None:
+    """
+    Load `raw_aurn` from DuckDB at `db_path`, forward-fill missing `no2` values
+    in `raw_aurn` up to `max_gap_hours`, and write back to `clean_aurn`.
+    """
+    # Connect to the DuckDB database (must exist)
+    con = duckdb.connect(database=db_path, read_only=False)
+
+    # Load raw_aurn into a pandas DataFrame
+    df = con.execute("SELECT * FROM raw_aurn ORDER BY datetime").df()
+    df["datetime"] = pd.to_datetime(df["datetime"])
+
+    # Forward-fill `no2` with a limit on gaps
+    df["no2"] = df["no2"].ffill(limit=max_gap_hours)
+
+    # Write clean_aurn back to DuckDB
+    con.execute("DROP TABLE IF EXISTS clean_aurn")
+    con.register("df_clean_aurn", df)
+    con.execute("CREATE TABLE clean_aurn AS SELECT * FROM df_clean_aurn")
+
+    con.close()
