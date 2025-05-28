@@ -1,0 +1,9 @@
+[flake8]
+max-line-length = 120
+ignore =
+    E221,  # multiple spaces before operator
+    E231,  # missing whitespace after ‘,’
+    E302,  # expected 2 blank lines
+    E305,  # expected 2 blank lines after class or function definition
+    E401,  # multiple imports on one line
+    E501   # line too long
