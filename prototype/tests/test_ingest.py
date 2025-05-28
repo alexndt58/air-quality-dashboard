@@ -1,45 +1,79 @@
-import sys
-from pathlib import Path
+#!/usr/bin/env python3
+"""
+Load pollutant CSV(s) from a directory into DuckDB.
+
+- If only one CSV (e.g. `AirQualityDataHourly.csv`), load it into `raw_aurn`.
+- If two (AURN & MET), split into `raw_aurn` & `raw_weather`.
+- If `MET` missing, creates empty `raw_weather`.
+
+Usage:
+    ingest(raw_dir: str, db_path: str)
+"""
+import os
 import duckdb
-import pandas as pd
-import pytest
 
-# ensure project root is on the path
-PROJECT_ROOT = Path(__file__).parents[2]
-sys.path.insert(0, str(PROJECT_ROOT))
 
-from prototype.ingestion.ingest import ingest
+def ingest(raw_dir: str, db_path: str) -> None:
+    """
+    Ingest CSV files from `raw_dir` into a DuckDB database at `db_path`.
+    """
+    # Ensure output directory exists
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
 
-@pytest.fixture
-def sample_data(tmp_path):
-    raw = tmp_path / "raw"
-    raw.mkdir()
-    # Minimal AURN CSV
-    aurn = pd.DataFrame({
-        "datetime": ["2025-01-01T00:00:00"],
-        "no2": [12.3],
-        "pm25": [4.5],
-        "site_name": ["TestSite"],
-        "latitude": [51.5],
-        "longitude": [-0.1]
-    })
-    aurn.to_csv(raw / "aurn_hourly_test.csv", index=False)
-    # *No* weather CSV to trigger fallback
-    return raw
+    # Connect to DuckDB
+    con = duckdb.connect(database=db_path, read_only=False)
 
-def test_ingest_creates_tables_and_empty_weather(tmp_path, sample_data):
-    db = tmp_path / "test.db"
-    # Run ingest on sample_data (no weather CSV present)
-    ingest(raw_dir=str(sample_data), db_path=str(db))
+    # Discover CSVs
+    files = sorted(f for f in os.listdir(raw_dir) if f.lower().endswith('.csv'))
+    aurn_file = None
+    weather_file = None
 
-    con = duckdb.connect(str(db), read_only=True)
-    tables = {r[0] for r in con.execute("SHOW TABLES").fetchall()}
-    assert "raw_aurn" in tables
-    assert "raw_weather" in tables
+    if len(files) == 1:
+        # Single CSV → treat as aurn
+        aurn_file = os.path.join(raw_dir, files[0])
+    else:
+        # Multiple CSVs → assign by prefix
+        for fname in files:
+            low = fname.lower()
+            path = os.path.join(raw_dir, fname)
+            if low.startswith('aurn'):
+                aurn_file = path
+            elif low.startswith('met') or low.startswith('weather'):
+                weather_file = path
 
-    # raw_aurn has 1 row
-    assert con.execute("SELECT COUNT(*) FROM raw_aurn").fetchone()[0] == 1
-    # raw_weather fallback is empty
-    assert con.execute("SELECT COUNT(*) FROM raw_weather").fetchone()[0] == 0
+    # Ingest AURN
+    if aurn_file:
+        con.execute(
+            f"CREATE OR REPLACE TABLE raw_aurn AS "
+            f"SELECT * FROM read_csv_auto('{aurn_file}')"
+        )
+    else:
+        # Empty raw_aurn
+        con.execute(
+            "CREATE OR REPLACE TABLE raw_aurn AS "
+            "SELECT CAST(NULL AS TIMESTAMP) AS datetime, "
+            "CAST(NULL AS DOUBLE) AS no2, "
+            "CAST(NULL AS DOUBLE) AS pm25, "
+            "CAST(NULL AS VARCHAR) AS site_name, "
+            "CAST(NULL AS DOUBLE) AS latitude, "
+            "CAST(NULL AS DOUBLE) AS longitude "
+            "WHERE FALSE"
+        )
+
+    # Ingest Weather
+    if weather_file:
+        con.execute(
+            f"CREATE OR REPLACE TABLE raw_weather AS "
+            f"SELECT * FROM read_csv_auto('{weather_file}')"
+        )
+    else:
+        # Empty raw_weather
+        con.execute(
+            "CREATE OR REPLACE TABLE raw_weather AS "
+            "SELECT CAST(NULL AS TIMESTAMP) AS datetime, "
+            "CAST(NULL AS DOUBLE) AS temp, "
+            "CAST(NULL AS DOUBLE) AS wind_speed "
+            "WHERE FALSE"
+        )
 
     con.close()
