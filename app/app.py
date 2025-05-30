@@ -269,6 +269,143 @@ if theme == "Dark":
 st.altair_chart(hist, use_container_width=True)
 
 
+################### Correlation scatter-plots ############################
+
+# ── Correlation Overview ────────────────────────────────────────────────
+st.subheader("Correlation Heatmap")
+# Compute pairwise correlations
+corr_mat = plot_df[selected].corr()
+
+# Melt into long form
+corr_src = (
+    corr_mat
+    .reset_index()
+    .melt(id_vars="index", var_name="variable", value_name="correlation")
+    .rename(columns={"index":"pollutant"})
+)
+
+# Altair heatmap
+heat = (
+    alt.Chart(corr_src)
+       .mark_rect()
+       .encode(
+           x=alt.X("variable:N", sort=selected, title=""),
+           y=alt.Y("pollutant:N", sort=selected, title=""),
+           color=alt.Color(
+               "correlation:Q",
+               scale=alt.Scale(scheme=scheme or "blues"),
+               legend=alt.Legend(title="r")
+           ),
+           tooltip=[
+               alt.Tooltip("pollutant:N", title="Pollutant X"),
+               alt.Tooltip("variable:N", title="Pollutant Y"),
+               alt.Tooltip("correlation:Q", format=".2f")
+           ]
+       )
+       .properties(width=350, height=350)
+)
+
+if theme == "Dark":
+    heat = heat.configure_axis(labelColor="white", titleColor="white")
+
+st.altair_chart(heat, use_container_width=False)
+
+
+# ── Pick-and-Plot Scatter with Trendline ─────────────────────────────────
+st.subheader("Pairwise Scatter + Trendline")
+pair = st.sidebar.multiselect(
+    "Choose two pollutants to compare",
+    options=selected,
+    default=selected[:2],
+    help="Select exactly two"
+)
+
+if len(pair) == 2:
+    x, y = pair
+    scatter = (
+        alt.Chart(plot_df)
+           .mark_circle(size=50, opacity=0.4)
+           .encode(
+               x=alt.X(f"{x}:Q", title=x),
+               y=alt.Y(f"{y}:Q", title=y),
+               tooltip=["Datetime:T", f"{x}:Q", f"{y}:Q"]
+           )
+    )
+    # Add a regression line
+    trend = (
+        alt.Chart(plot_df)
+           .transform_regression(x, y, method="linear")
+           .mark_line(color="firebrick", strokeWidth=2)
+           .encode(x=x, y=y)
+    )
+    chart = (scatter + trend).properties(width=600, height=400).interactive()
+    if theme == "Dark":
+        chart = chart.configure_axis(labelColor="white", titleColor="white")
+    st.altair_chart(chart, use_container_width=True)
+else:
+    st.info("Please select exactly two pollutants for the scatter plot.")
+
+########### Predictive model ###########################################
+
+import numpy as np
+
+# ── Simple Trend Forecast ──────────────────────────────────────────────
+st.subheader("Forecast: Simple Linear Trend")
+
+# 1) Sidebar controls
+poll_fc = st.sidebar.selectbox(
+    "Choose pollutant to forecast", options=selected, index=0
+)
+horizon = st.sidebar.number_input(
+    "Forecast horizon (periods)", min_value=1, max_value=168, value=24
+)
+
+# 2) Prepare data
+fc_df = plot_df[["Datetime", poll_fc]].dropna().reset_index(drop=True)
+if len(fc_df) < 2:
+    st.warning("Not enough data to build a forecast.")
+else:
+    # map dates to numeric (ordinal)
+    x = fc_df["Datetime"].map(lambda dt: dt.toordinal()).to_numpy()
+    y = fc_df[poll_fc].to_numpy()
+
+    # 3) Fit linear trend
+    coef = np.polyfit(x, y, 1)
+    model = np.poly1d(coef)
+
+    # 4) Build future dates
+    # infer frequency: raw/hourly → 'h', daily → 'd'
+    freq = {"raw":"h","hourly":"h","daily":"d"}[agg]
+    last = fc_df["Datetime"].iloc[-1]
+    future = pd.date_range(last, periods=horizon+1, freq=freq)[1:]
+
+    # 5) Predict
+    x_future = np.array([d.toordinal() for d in future])
+    y_future = model(x_future)
+    fcast_df = pd.DataFrame({"Datetime": future, poll_fc: y_future})
+
+    # 6) Plot history + forecast
+    hist = (
+        alt.Chart(fc_df)
+           .mark_line()
+           .encode(x="Datetime:T", y=f"{poll_fc}:Q")
+    )
+    pred = (
+        alt.Chart(fcast_df)
+           .mark_line(color="orange", strokeDash=[4,4])
+           .encode(x="Datetime:T", y=f"{poll_fc}:Q")
+    )
+    chart = (hist + pred).properties(
+        width=700, height=300
+    ).interactive()
+    if theme == "Dark":
+        chart = chart.configure_axis(labelColor="white", titleColor="white")
+    st.altair_chart(chart, use_container_width=True)
+
+    # 7) Show model equation & metrics
+    st.markdown(f"**Trend line:** y = {coef[0]:.4e}·x + {coef[1]:.2f}")
+
+
 
 
 ###################################################################################################
