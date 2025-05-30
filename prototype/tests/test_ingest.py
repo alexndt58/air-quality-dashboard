@@ -23,9 +23,12 @@ def test_ingest_multiple_csv_files(tmp_path):
     assert "aurn" in tables
     assert "met" in tables
 
-    # 4) Verify the contents match the CSVs
-    df_db_a = con.execute("SELECT * FROM aurn ORDER BY x").df()
-    pd.testing.assert_frame_equal(df_a.reset_index(drop=True), df_db_a)
+    # 4a) Verify the contents of aurn match (sorted by x)
+    df_db_a = con.execute("SELECT * FROM aurn").df()
+    df_db_a = df_db_a.sort_values("x").reset_index(drop=True)
+    pd.testing.assert_frame_equal(df_a.sort_values("x").reset_index(drop=True), df_db_a)
 
-    df_db_b = con.execute("SELECT * FROM met ORDER BY foo").df()
-    pd.testing.assert_frame_equal(df_b.reset_index(drop=True), df_db_b)
+    # 4b) Verify the contents of met match (sorted by foo)
+    df_db_b = con.execute("SELECT * FROM met").df()
+    df_db_b = df_db_b.sort_values("foo").reset_index(drop=True)
+    pd.testing.assert_frame_equal(df_b.sort_values("foo").reset_index(drop=True), df_db_b)

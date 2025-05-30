@@ -1,42 +1,70 @@
-# prototype/cleaning/clean.py
 import duckdb
 import pandas as pd
-from pathlib import Path
+from datetime import timedelta
 
-def clean_db(db_path: str, output_dir: str = "data/clean"):
+def clean(db_path: str, max_gap_hours: int):
     """
-    For each table in the DuckDB at db_path:
-      - parse datetime,
-      - drop rows with any required-NaNs,
-      - drop rows immediately after a gap >1h,
-      - write cleaned CSV to output_dir/<table>.csv
+    Read all pollutant tables + met table from db_path, join on datetime,
+    drop pollutant rows if time gaps > max_gap_hours, and write back
+    into a cleaned table named `clean_air_quality`.
     """
     con = duckdb.connect(db_path)
-    # find all user tables
-    tables = [r[0] for r in con.execute("SHOW TABLES").fetchall()]
-    outdir = Path(output_dir)
-    outdir.mkdir(parents=True, exist_ok=True)
 
-    for table in tables:
-        df = con.execute(f"SELECT * FROM {table}").df()
-        # ensure datetime
-        df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
-        df = df.dropna(subset=["datetime"])
-        df = df.sort_values("datetime")
+    # Identify which tables contain pollutant vs met data
+    tables = [row[0] for row in con.execute(
+        "SELECT table_name FROM information_schema.tables WHERE table_schema='main'"
+    ).fetchall()]
 
-        # drop any rows with missing pollutant/weather fields
-        # we assume: everything except datetime is required
-        req_cols = [c for c in df.columns if c != "datetime"]
-        df = df.dropna(subset=req_cols, how="any")
+    # assume weather table is named 'met' or 'weather'
+    met_tables = [t for t in tables if t.startswith("met")]
+    pollutant_tables = [t for t in tables if t not in met_tables]
 
-        # drop rows that follow a gap >1 hour
-        gaps = df["datetime"].diff() > pd.Timedelta(hours=1)
-        if gaps.any():
-            df = df.loc[~gaps]
+    # load and concatenate pollutant data
+    dfs = []
+    for tbl in pollutant_tables:
+        df = con.execute(f"SELECT * FROM {tbl}").df()
+        dfs.append(df)
+    df_poll = pd.concat(dfs, ignore_index=True)
 
-        out_csv = outdir / f"{table}.csv"
-        df.to_csv(out_csv, index=False)
-        print(f"  • Cleaned `{table}` → {out_csv}")
+    # load weather
+    if met_tables:
+        df_met = con.execute(f"SELECT * FROM {met_tables[0]}").df()
+    else:
+        df_met = pd.DataFrame()
 
+    # parse datetime
+    df_poll["datetime"] = pd.to_datetime(df_poll["datetime"])
+    if not df_met.empty:
+        df_met["datetime"] = pd.to_datetime(df_met["datetime"])
+
+    # sort and drop large gaps
+    df_poll = df_poll.sort_values("datetime")
+    df_poll["gap"] = df_poll["datetime"].diff().dt.total_seconds().div(3600)
+    df_poll = df_poll[(df_poll["gap"].isna()) | (df_poll["gap"] <= max_gap_hours)]
+    df_poll = df_poll.drop(columns="gap")
+
+    # merge weather if present
+    if not df_met.empty:
+        df = pd.merge_asof(
+            df_poll.sort_values("datetime"),
+            df_met.sort_values("datetime"),
+            on="datetime",
+            direction="nearest",
+            tolerance=pd.Timedelta(hours=1)
+        )
+    else:
+        df = df_poll
+
+    # write cleaned table back to DB
+    con.execute("DROP TABLE IF EXISTS clean_air_quality")
+    con.register("to_clean", df)
+    con.execute("CREATE TABLE clean_air_quality AS SELECT * FROM to_clean")
     con.close()
-    print(f"✅ All tables cleaned into {output_dir}")
+
+    print(f"✅ Cleaned data written to `clean_air_quality` in {db_path}")
+
+if __name__ == "__main__":
+    import sys
+    # e.g. python clean.py data/airquality.duckdb 2
+    db, gap = sys.argv[1], int(sys.argv[2])
+    clean(db, gap)
