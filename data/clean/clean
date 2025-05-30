@@ -1,37 +1,42 @@
-# **prototype/cleaning/clean.py** ---
-
-# python
-#!/usr/bin/env python3
-"""
-Load `raw_aurn` from DuckDB, forward-fill gaps, and write `clean_aurn`.
-
-Functions:
-  clean(db_path, max_gap_hours) → reads `raw_aurn`, fills, writes `clean_aurn`.
-
-Test fixtures call `clean(db_path=..., max_gap_hours=...)`.
-"""
+# prototype/cleaning/clean.py
 import duckdb
 import pandas as pd
+from pathlib import Path
 
-def clean(db_path: str, max_gap_hours: int) -> None:
+def clean_db(db_path: str, output_dir: str = "data/clean"):
     """
-    Load `raw_aurn` from `db_path`, forward-fill missing `no2` values
-    up to `max_gap_hours`, and write to `clean_aurn` table.
+    For each table in the DuckDB at db_path:
+      - parse datetime,
+      - drop rows with any required-NaNs,
+      - drop rows immediately after a gap >1h,
+      - write cleaned CSV to output_dir/<table>.csv
     """
-    # Connect to the DuckDB database
-    con = duckdb.connect(database=db_path, read_only=False)
+    con = duckdb.connect(db_path)
+    # find all user tables
+    tables = [r[0] for r in con.execute("SHOW TABLES").fetchall()]
+    outdir = Path(output_dir)
+    outdir.mkdir(parents=True, exist_ok=True)
 
-    # Load raw_aurn into a pandas DataFrame
-    df = con.execute("SELECT * FROM raw_aurn ORDER BY datetime").df()
-    df['datetime'] = pd.to_datetime(df['datetime'])
+    for table in tables:
+        df = con.execute(f"SELECT * FROM {table}").df()
+        # ensure datetime
+        df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
+        df = df.dropna(subset=["datetime"])
+        df = df.sort_values("datetime")
 
-    # Forward-fill `no2` with a limit on gaps
-    df['no2'] = df['no2'].ffill(limit=max_gap_hours)
+        # drop any rows with missing pollutant/weather fields
+        # we assume: everything except datetime is required
+        req_cols = [c for c in df.columns if c != "datetime"]
+        df = df.dropna(subset=req_cols, how="any")
 
-    # Write clean_aurn back to DuckDB
-    con.execute("DROP TABLE IF EXISTS clean_aurn")
-    con.register('df_clean_aurn', df)
-    con.execute("CREATE TABLE clean_aurn AS SELECT * FROM df_clean_aurn")
+        # drop rows that follow a gap >1 hour
+        gaps = df["datetime"].diff() > pd.Timedelta(hours=1)
+        if gaps.any():
+            df = df.loc[~gaps]
+
+        out_csv = outdir / f"{table}.csv"
+        df.to_csv(out_csv, index=False)
+        print(f"  • Cleaned `{table}` → {out_csv}")
 
     con.close()
-
+    print(f"✅ All tables cleaned into {output_dir}")

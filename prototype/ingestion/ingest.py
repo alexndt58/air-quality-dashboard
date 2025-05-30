@@ -1,43 +1,21 @@
-# **prototype/ingestion/ingest.py** ---
-
-# python
-#!/usr/bin/env python3
-"""
-Load raw AURN CSVs from a directory into DuckDB.
-
-Functions:
-  ingest(raw_dir, db_path) → loads CSV into table `raw_aurn`.
-
-Test fixtures call `ingest(raw_dir=..., db_path=...)`.
-"""
-import os
+# prototype/ingestion/ingest.py
 import duckdb
+from pathlib import Path
 
-def ingest(raw_dir: str, db_path: str) -> None:
+def ingest(raw_dir: str = "data/raw", db_path: str = "data/airquality.duckdb"):
     """
-    Read the first CSV in `raw_dir` into a DuckDB database at `db_path`.
-    Creates or replaces table `raw_aurn`.
+    Ingest every CSV file in `raw_dir` into DuckDB at `db_path`,
+    creating one table per file (named after the file stem).
     """
-    # Ensure output directory exists
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)
-
-    con = duckdb.connect(database=db_path, read_only=False)
-
-    # Find first CSV file
-    csvs = [f for f in sorted(os.listdir(raw_dir)) if f.lower().endswith('.csv')]
-    if csvs:
-        path = os.path.join(raw_dir, csvs[0])
-        con.execute(
-            f"CREATE OR REPLACE TABLE raw_aurn AS "
-            f"SELECT * FROM read_csv_auto('{path}')"
-        )
-    else:
-        # Empty fallback
-        con.execute(
-            "CREATE OR REPLACE TABLE raw_aurn AS "
-            "SELECT CAST(NULL AS TIMESTAMP) AS datetime "
-            "WHERE FALSE"
-        )
-
+    con = duckdb.connect(db_path)
+    raw_dir = Path(raw_dir)
+    for csv in raw_dir.glob("*.csv"):
+        table = csv.stem
+        con.execute(f"DROP TABLE IF EXISTS {table}")
+        con.execute(f"""
+            CREATE TABLE {table} AS
+            SELECT * FROM read_csv_auto('{csv}')
+        """)
+        print(f"  • Ingested {csv.name} → table `{table}`")
     con.close()
-
+    print(f"✅ All CSVs in {raw_dir} ingested into {db_path}")
