@@ -1,41 +1,79 @@
 # prototype/cleaning/clean.py
-
+"""
+Clean tables inside DuckDB: remove gaps > max_gap_hours, drop empty, and produce cleaned tables.
+"""
 import duckdb
-import pandas as pd
+import click
+import logging
+from pathlib import Path
 
-def clean(db_path: str, max_gap_hours: float):
+logger = logging.getLogger(__name__)
+
+@click.command()
+@click.option(
+    "--db-path",
+    required=True,
+    type=click.Path(exists=True, path_type=Path),
+    help="DuckDB file path to read/write"
+)
+@click.option(
+    "--max-gap-hours",
+    default=2,
+    show_default=True,
+    type=float,
+    help="Maximum allowed gap between consecutive timestamps"
+)
+def clean(db_path: Path, max_gap_hours: float):
     """
-    For each raw table in the DuckDB at db_path,
-    drop any row whose time‐gap to the previous > max_gap_hours,
-    and write it out as clean_<table>.
+    Read each raw table, enforce max gap, drop fully-null rows, and store as clean_<name>.
     """
-    con = duckdb.connect(db_path)
-    tables = [row[0] for row in con.execute("SHOW TABLES").fetchall()]
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s"
+    )
 
-    for tbl in tables:
-        if tbl.startswith("clean_"):
-            continue
+    db_path = db_path.resolve()
+    con = duckdb.connect(str(db_path))
+    try:
+        tables = [r[0] for r in con.execute("SHOW TABLES").fetchall()]
+        raw_tables = [t for t in tables if not t.startswith('clean_')]
 
-        # Load into pandas
-        df = con.execute(f"SELECT * FROM {tbl}").df()
+        for tbl in raw_tables:
+            clean_tbl = f"clean_{tbl}"
+            logger.info("Cleaning table '%s' → '%s'", tbl, clean_tbl)
+            # 1) Check for datetime column
+            info = con.execute(f"DESCRIBE {tbl}").df()
+            if 'datetime' not in info.column_name.str.lower().tolist():
+                logger.warning("Skipping %s: no datetime column", tbl)
+                continue
+            # 2) Build cleaned table
+            con.execute(f"DROP TABLE IF EXISTS {clean_tbl}")
+            con.execute(
+                f"CREATE TABLE {clean_tbl} AS\
+                SELECT * FROM {tbl} \
+                WHERE datetime IS NOT NULL"
+            )
+            # 3) Optionally filter gaps
+            con.execute(
+                f"ALTER TABLE {clean_tbl} ADD COLUMN _prev_ts TIMESTAMP;"
+            )
+            con.execute(
+                f"UPDATE {clean_tbl} SET _prev_ts = LAG(datetime) OVER (ORDER BY datetime)"
+            )
+            con.execute(
+                f"DELETE FROM {clean_tbl} \
+                WHERE _prev_ts IS NOT NULL \
+                AND DATEDIFF('hour', _prev_ts, datetime) > {max_gap_hours}"
+            )
+            # 4) Drop helper
+            con.execute(f"ALTER TABLE {clean_tbl} DROP COLUMN _prev_ts")
+            logger.info("→ %s created", clean_tbl)
+        logger.info("✅ Cleaning complete.")
+    except Exception:
+        logger.exception("Cleaning failed")
+        raise
+    finally:
+        con.close()
 
-        if "datetime" in df.columns:
-            df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
-            df = df.dropna(subset=["datetime"])
-            df = df.sort_values("datetime")
-            # compute hourly gaps
-            df["__diff"] = df["datetime"].diff().dt.total_seconds() / 3600.0
-            # keep first row (diff NaN) or diff ≤ max_gap
-            df = df[df["__diff"].isna() | (df["__diff"] <= max_gap_hours)]
-            df = df.drop(columns="__diff")
-
-        cleaned_tbl = f"clean_{tbl}"
-        con.execute(f"DROP TABLE IF EXISTS {cleaned_tbl}")
-        # register the cleaned dataframe and persist it
-        con.register("tmp_df", df)
-        con.execute(f"CREATE TABLE {cleaned_tbl} AS SELECT * FROM tmp_df")
-        con.unregister("tmp_df")
-        print(f"• Cleaned table `{cleaned_tbl}` created from `{tbl}`")
-
-    con.close()
-    print(f"✅ Cleaning complete. Clean tables written to {db_path}")
+if __name__ == "__main__":
+    clean()
