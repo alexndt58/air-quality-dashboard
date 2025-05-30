@@ -10,3 +10,6 @@ python-pptx
 fpdf
 pillow
 pyarrow
+pydeck
+altair
+pandera
